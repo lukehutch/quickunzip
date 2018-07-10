@@ -127,9 +127,6 @@ public class QuickUnzip {
             System.exit(1);
         }
 
-        // Start the worker threads
-        final var executor = Executors.newFixedThreadPool(NUM_THREADS);
-
         // Singleton map for creating parent directories, to avoid duplicating work
         final var createdParentDirs = new SingletonMap<File, Boolean>() {
             @Override
@@ -163,6 +160,9 @@ public class QuickUnzip {
 
         // Keep a list of ZipFiles that will need closing on completion 
         final var openZipFiles = new ConcurrentLinkedQueue<ZipFile>();
+
+        // Start the worker threads
+        final var executor = Executors.newFixedThreadPool(NUM_THREADS);
 
         // Iterate through ZipEntries, extracting in parallel
         try {

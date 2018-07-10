@@ -29,7 +29,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
 
 /** A map from keys to singleton instances. */
-public abstract class SingletonMap<K, V> {
+abstract class SingletonMap<K, V> {
     private final ConcurrentMap<K, SingletonHolder<V>> map = new ConcurrentHashMap<>();
     private final ConcurrentLinkedQueue<SingletonHolder<V>> singletonHolderRecycler = new ConcurrentLinkedQueue<>();
 

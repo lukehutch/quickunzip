@@ -31,7 +31,6 @@ import java.util.ArrayList;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -127,9 +126,6 @@ public class QuickUnzip {
             System.exit(1);
         }
 
-        // Start the worker threads
-        final var executor = Executors.newFixedThreadPool(NUM_THREADS);
-
         // Singleton map for creating parent directories, to avoid duplicating work
         final var createdParentDirs = new SingletonMap<File, Boolean>() {
             @Override
@@ -161,11 +157,9 @@ public class QuickUnzip {
             }
         };
 
-        // Keep a list of ZipFiles that will need closing on completion 
-        final var openZipFiles = new ConcurrentLinkedQueue<ZipFile>();
-
         // Iterate through ZipEntries, extracting in parallel
-        try {
+        try (var openZipFiles = new AutoCloseableCollection<>(new ConcurrentLinkedQueue<ZipFile>());
+                var executor = new AutoCloseableExecutorService("QuickUnzip", NUM_THREADS)) {
             final var futures = new ArrayList<Future<Void>>(zipEntries.size());
             for (final var zipEntry : zipEntries) {
                 futures.add(executor.submit(new Callable<Void>() {
@@ -241,17 +235,6 @@ public class QuickUnzip {
                     future.get();
                 } catch (InterruptedException | ExecutionException e) {
                     System.err.println("Unzipping did not complete successfully: " + e);
-                }
-            }
-        } finally {
-            // Shut down thread pool
-            executor.shutdown();
-
-            // Close ZipFiles
-            for (final var zipFile : openZipFiles) {
-                try {
-                    zipFile.close();
-                } catch (final IOException e) {
                 }
             }
         }

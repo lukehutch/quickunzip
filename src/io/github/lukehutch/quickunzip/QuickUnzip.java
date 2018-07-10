@@ -28,15 +28,13 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.Future;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
+
+import io.github.lukehutch.quickunzip.Utils.AutoCloseableConcurrentQueue;
+import io.github.lukehutch.quickunzip.Utils.AutoCloseableExecutorService;
+import io.github.lukehutch.quickunzip.Utils.AutoCloseableFutureListWithCompletionBarrier;
+import io.github.lukehutch.quickunzip.Utils.SingletonMap;
 
 /** A fast unzipper for java that unzips a zipfile contents in parallel across multiple threads. */
 public class QuickUnzip {
@@ -44,76 +42,6 @@ public class QuickUnzip {
     /** Allocate 1.5x as many worker threads as CPU threads. */
     private static final int NUM_THREADS = Math.max(6,
             (int) Math.ceil(Runtime.getRuntime().availableProcessors() * 1.5f));
-
-    // -------------------------------------------------------------------------------------------------------------
-
-    /** A ThreadPoolExecutor that can be used in a try-with-resources block. */
-    private static class AutoCloseableExecutorService extends ThreadPoolExecutor implements AutoCloseable {
-        /** A ThreadPoolExecutor that can be used in a try-with-resources block. */
-        public AutoCloseableExecutorService(final String threadNamePrefix, final int numThreads) {
-            super(numThreads, numThreads, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(),
-                    new ThreadFactory() {
-                        ThreadLocal<AtomicInteger> threadIdx = ThreadLocal.withInitial(() -> new AtomicInteger());
-
-                        @Override
-                        public Thread newThread(final Runnable r) {
-                            final Thread t = new Thread(r,
-                                    threadNamePrefix + "-" + threadIdx.get().getAndIncrement());
-                            t.setDaemon(true);
-                            return t;
-                        }
-                    });
-        }
-
-        /** Shut down thread pool on close(). */
-        @Override
-        public void close() {
-            try {
-                shutdownNow();
-            } catch (final Exception e) {
-                throw new RuntimeException("Exception shutting down ExecutorService: " + e);
-            }
-        }
-    }
-
-    /** A list of AutoCloseable items that can be used in a try-with-resources block. */
-    private static class AutoCloseableConcurrentQueue<T extends AutoCloseable> extends ConcurrentLinkedQueue<T>
-            implements AutoCloseable {
-        /** Empty the queue, calling close() on each item. */
-        @Override
-        public void close() {
-            while (!isEmpty()) {
-                final T item = remove();
-                try {
-                    item.close();
-                } catch (final Exception e) {
-                }
-            }
-        }
-    }
-
-    /**
-     * An AutoCloseable list of {@code Future<Void>} items that can be used in a try-with-resources block. When
-     * close() is called on this list, all items' {@code get()} methods are called, implementing a completion
-     * barrier.
-     */
-    private static class AutoCloseableFutureListWithCompletionBarrier extends ArrayList<Future<Void>>
-            implements AutoCloseable {
-        public AutoCloseableFutureListWithCompletionBarrier(final int size) {
-            super(size);
-        }
-
-        /** Completion barrier. */
-        @Override
-        public void close() {
-            for (final var future : this) {
-                try {
-                    future.get();
-                } catch (final Exception e) {
-                }
-            }
-        }
-    }
 
     // -------------------------------------------------------------------------------------------------------------
 

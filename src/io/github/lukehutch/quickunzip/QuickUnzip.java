@@ -28,10 +28,13 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -39,7 +42,80 @@ import java.util.zip.ZipFile;
 public class QuickUnzip {
 
     /** Allocate 1.5x as many worker threads as CPU threads. */
-    private static final int NUM_THREADS = (int) Math.ceil(Runtime.getRuntime().availableProcessors() * 1.5f);
+    private static final int NUM_THREADS = Math.max(6,
+            (int) Math.ceil(Runtime.getRuntime().availableProcessors() * 1.5f));
+
+    // -------------------------------------------------------------------------------------------------------------
+
+    /** A ThreadPoolExecutor that can be used in a try-with-resources block. */
+    private static class AutoCloseableExecutorService extends ThreadPoolExecutor implements AutoCloseable {
+        /** A ThreadPoolExecutor that can be used in a try-with-resources block. */
+        public AutoCloseableExecutorService(final String threadNamePrefix, final int numThreads) {
+            super(numThreads, numThreads, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(),
+                    new ThreadFactory() {
+                        ThreadLocal<AtomicInteger> threadIdx = ThreadLocal.withInitial(() -> new AtomicInteger());
+
+                        @Override
+                        public Thread newThread(final Runnable r) {
+                            final Thread t = new Thread(r,
+                                    threadNamePrefix + "-" + threadIdx.get().getAndIncrement());
+                            t.setDaemon(true);
+                            return t;
+                        }
+                    });
+        }
+
+        /** Shut down thread pool on close(). */
+        @Override
+        public void close() {
+            try {
+                shutdownNow();
+            } catch (final Exception e) {
+                throw new RuntimeException("Exception shutting down ExecutorService: " + e);
+            }
+        }
+    }
+
+    /** A list of AutoCloseable items that can be used in a try-with-resources block. */
+    private static class AutoCloseableConcurrentQueue<T extends AutoCloseable> extends ConcurrentLinkedQueue<T>
+            implements AutoCloseable {
+        /** Empty the queue, calling close() on each item. */
+        @Override
+        public void close() {
+            while (!isEmpty()) {
+                T item = remove();
+                try {
+                    item.close();
+                } catch (final Exception e) {
+                }
+            }
+        }
+    }
+
+    /**
+     * An AutoCloseable list of {@code Future<Void>} items that can be used in a try-with-resources block. When
+     * close() is called on this list, all items' {@code get()} methods are called, implementing a completion
+     * barrier.
+     */
+    private static class AutoCloseableFutureListWithCompletionBarrier extends ArrayList<Future<Void>>
+            implements AutoCloseable {
+        public AutoCloseableFutureListWithCompletionBarrier(int size) {
+            super(size);
+        }
+
+        /** Completion barrier. */
+        @Override
+        public void close() {
+            for (var future : this) {
+                try {
+                    future.get();
+                } catch (final Exception e) {
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------------------------------------------
 
     /**
      * Unzips the contents of the input zipfile into the requested output directory, creating the directory if it
@@ -158,14 +234,14 @@ public class QuickUnzip {
         };
 
         // Iterate through ZipEntries, extracting in parallel
-        try (var openZipFiles = new AutoCloseableCollection<>(new ConcurrentLinkedQueue<ZipFile>());
-                var executor = new AutoCloseableExecutorService("QuickUnzip", NUM_THREADS)) {
-            final var futures = new ArrayList<Future<Void>>(zipEntries.size());
+        try (final var openZipFiles = new AutoCloseableConcurrentQueue<ZipFile>();
+                final var executor = new AutoCloseableExecutorService("QuickUnzip", NUM_THREADS);
+                final var futures = new AutoCloseableFutureListWithCompletionBarrier(zipEntries.size())) {
             for (final var zipEntry : zipEntries) {
-                futures.add(executor.submit(new Callable<Void>() {
-                    // Open one ZipFile instance per thread
-                    ThreadLocal<ZipFile> zipFile = ThreadLocal.withInitial(() -> {
+                futures.add(executor.submit(() -> {
+                    ThreadLocal<ZipFile> zipFileTL = ThreadLocal.withInitial(() -> {
                         try {
+                            // Open one ZipFile instance per thread
                             final ZipFile zipFile = new ZipFile(inputZipfile);
                             openZipFiles.add(zipFile);
                             return zipFile;
@@ -174,73 +250,65 @@ public class QuickUnzip {
                             System.err.println("Could not open zipfile " + inputZipfile + " : " + e);
                             System.exit(1);
                         }
+                        // Keep compiler happy
                         return null;
                     });
-
-                    /** Extract one ZipEntry. */
-                    @Override
-                    public Void call() throws Exception {
-                        var entryName = zipEntry.getName();
-                        while (entryName.startsWith("/")) {
-                            // Strip leading "/" if present
-                            entryName = entryName.substring(1);
-                        }
-                        try {
-                            // Make sure we don't allow paths that use "../" to break out of the unzip root dir
-                            final var entryPath = unzipDirPathFinal.resolve(entryName);
-                            if (!entryPath.startsWith(unzipDirPathFinal)) {
-                                if (verbose) {
-                                    System.out.println("      Bad path: " + entryName);
-                                }
-                            } else {
-                                // Create parent directories if needed
-                                final var entryFile = entryPath.toFile();
-                                final var parentDir = entryFile.getParentFile();
-                                final var parentDirExists = createdParentDirs.getOrCreateSingleton(parentDir);
-                                if (parentDirExists) {
-                                    // Open ZipEntry as an InputStream
-                                    try (var inputStream = zipFile.get().getInputStream(zipEntry)) {
-                                        if (overwrite) {
+                    var entryName = zipEntry.getName();
+                    while (entryName.startsWith("/")) {
+                        // Strip leading "/" if present
+                        entryName = entryName.substring(1);
+                    }
+                    try {
+                        // Make sure we don't allow paths that use "../" to break out of the unzip root dir
+                        final var entryPath = unzipDirPathFinal.resolve(entryName);
+                        if (!entryPath.startsWith(unzipDirPathFinal)) {
+                            if (verbose) {
+                                System.out.println("      Bad path: " + entryName);
+                            }
+                        } else {
+                            // Create parent directories if needed
+                            final var entryFile = entryPath.toFile();
+                            final var parentDir = entryFile.getParentFile();
+                            final var parentDirExists = createdParentDirs.getOrCreateSingleton(parentDir);
+                            if (parentDirExists) {
+                                // Open ZipEntry as an InputStream
+                                try (var inputStream = zipFileTL.get().getInputStream(zipEntry)) {
+                                    if (overwrite) {
+                                        if (verbose) {
+                                            System.out.println("     Unzipping: " + entryName);
+                                        }
+                                        // Copy the contents of the ZipEntry InputStream to the output file,
+                                        // overwriting existing files of the same name
+                                        Files.copy(inputStream, entryPath, StandardCopyOption.REPLACE_EXISTING);
+                                    } else {
+                                        if (!entryFile.exists()) {
                                             if (verbose) {
                                                 System.out.println("     Unzipping: " + entryName);
                                             }
                                             // Copy the contents of the ZipEntry InputStream to the output file
-                                            Files.copy(inputStream, entryPath, StandardCopyOption.REPLACE_EXISTING);
-                                        } else {
-                                            if (!entryFile.exists()) {
-                                                if (verbose) {
-                                                    System.out.println("     Unzipping: " + entryName);
-                                                }
-                                                // Copy the contents of the ZipEntry InputStream to the output file
-                                                Files.copy(inputStream, entryPath);
-                                            } else if (verbose) {
-                                                System.out.println("Already exists: " + entryName);
-                                            }
+                                            Files.copy(inputStream, entryPath);
+                                        } else if (verbose) {
+                                            System.out.println("Already exists: " + entryName);
                                         }
                                     }
                                 }
                             }
-                        } catch (final InvalidPathException ex) {
-                            if (verbose) {
-                                System.out.println("  Invalid path: " + entryName);
-                            }
                         }
-                        return null;
+                    } catch (final InvalidPathException ex) {
+                        if (verbose) {
+                            System.out.println("  Invalid path: " + entryName);
+                        }
                     }
+                    // Return placeholder Void result for Future<Void>
+                    return null;
                 }));
-            }
-            // Completion barrier
-            for (final var future : futures) {
-                try {
-                    future.get();
-                } catch (InterruptedException | ExecutionException e) {
-                    System.err.println("Unzipping did not complete successfully: " + e);
-                }
             }
         }
         System.out.flush();
         System.err.flush();
     }
+
+    // -------------------------------------------------------------------------------------------------------------
 
     public static void main(final String[] args) {
         final var unmatchedArgs = new ArrayList<String>();

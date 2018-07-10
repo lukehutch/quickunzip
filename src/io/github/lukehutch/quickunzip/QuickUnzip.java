@@ -83,7 +83,7 @@ public class QuickUnzip {
         @Override
         public void close() {
             while (!isEmpty()) {
-                T item = remove();
+                final T item = remove();
                 try {
                     item.close();
                 } catch (final Exception e) {
@@ -99,14 +99,14 @@ public class QuickUnzip {
      */
     private static class AutoCloseableFutureListWithCompletionBarrier extends ArrayList<Future<Void>>
             implements AutoCloseable {
-        public AutoCloseableFutureListWithCompletionBarrier(int size) {
+        public AutoCloseableFutureListWithCompletionBarrier(final int size) {
             super(size);
         }
 
         /** Completion barrier. */
         @Override
         public void close() {
-            for (var future : this) {
+            for (final var future : this) {
                 try {
                     future.get();
                 } catch (final Exception e) {
@@ -187,23 +187,16 @@ public class QuickUnzip {
         final var zipEntries = new ArrayList<ZipEntry>();
         try (var zipFile = new ZipFile(inputZipfile)) {
             for (final var e = zipFile.entries(); e.hasMoreElements();) {
-                final var zipEntry = e.nextElement();
-                if (!zipEntry.isDirectory() && !zipEntry.getName().endsWith("/")) {
-                    zipEntries.add(zipEntry);
-                }
+                zipEntries.add(e.nextElement());
             }
         } catch (final IOException e) {
             System.err.println("Could not read zipfile directory entries: " + e);
             System.exit(1);
         }
 
-        if (zipEntries.isEmpty()) {
-            System.err.println("Zipfile contains no files");
-            System.exit(1);
-        }
-
-        // Singleton map for creating parent directories, to avoid duplicating work
-        final var createdParentDirs = new SingletonMap<File, Boolean>() {
+        // Singleton map indicating which directories were able to be successfully created (or already existed),
+        // to avoid duplicating work calling mkdirs() multiple times for the same directories
+        final var createdDirs = new SingletonMap<File, Boolean>() {
             @Override
             public Boolean newInstance(final File parentDir) throws Exception {
                 var parentDirExists = parentDir.exists();
@@ -239,7 +232,7 @@ public class QuickUnzip {
                 final var futures = new AutoCloseableFutureListWithCompletionBarrier(zipEntries.size())) {
             for (final var zipEntry : zipEntries) {
                 futures.add(executor.submit(() -> {
-                    ThreadLocal<ZipFile> zipFileTL = ThreadLocal.withInitial(() -> {
+                    final ThreadLocal<ZipFile> zipFileTL = ThreadLocal.withInitial(() -> {
                         try {
                             // Open one ZipFile instance per thread
                             final ZipFile zipFile = new ZipFile(inputZipfile);
@@ -265,11 +258,14 @@ public class QuickUnzip {
                             if (verbose) {
                                 System.out.println("      Bad path: " + entryName);
                             }
+                        } else if (zipEntry.isDirectory()) {
+                            // Recreate directory entries, so that empty directories are recreated 
+                            createdDirs.getOrCreateSingleton(entryPath.toFile());
                         } else {
                             // Create parent directories if needed
                             final var entryFile = entryPath.toFile();
                             final var parentDir = entryFile.getParentFile();
-                            final var parentDirExists = createdParentDirs.getOrCreateSingleton(parentDir);
+                            final var parentDirExists = createdDirs.getOrCreateSingleton(parentDir);
                             if (parentDirExists) {
                                 // Open ZipEntry as an InputStream
                                 try (var inputStream = zipFileTL.get().getInputStream(zipEntry)) {

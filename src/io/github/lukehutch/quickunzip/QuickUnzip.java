@@ -148,6 +148,10 @@ public class QuickUnzip {
                         } else {
                             System.out.println("      Creating: " + dirPathRelative);
                         }
+                    } else {
+                        if (!parentDir.isDirectory()) {
+                            parentDirExists = false;
+                        }
                     }
                 }
                 return parentDirExists;

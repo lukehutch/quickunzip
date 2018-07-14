@@ -111,7 +111,7 @@ public class QuickUnzip {
         }
         final var unzipDirPathFinal = unzipDirPath;
 
-        // Open the ZipFile and read all ZipEntries, ignoring directory entries
+        // Open the ZipFile and read all ZipEntries
         final var zipEntries = new ArrayList<ZipEntry>();
         try (var zipFile = new ZipFile(inputZipfile)) {
             for (final var e = zipFile.entries(); e.hasMoreElements();) {

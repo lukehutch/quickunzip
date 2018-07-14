@@ -144,14 +144,12 @@ public class QuickUnzip {
                         } else if (!parentDir.isDirectory()) {
                             // Can't overwrite a file with a directory 
                             System.out.println("Already exists: " + dirPathRelative);
-                            parentDirExists = false;
                         } else {
                             System.out.println("      Creating: " + dirPathRelative);
                         }
-                    } else {
-                        if (!parentDir.isDirectory()) {
-                            parentDirExists = false;
-                        }
+                    }
+                    if (!parentDir.isDirectory()) {
+                        parentDirExists = false;
                     }
                 }
                 return parentDirExists;

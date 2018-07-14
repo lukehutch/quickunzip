@@ -63,7 +63,7 @@ public class QuickUnzip {
      * @param verbose
      *            If true, show directory and file names as they are created.
      */
-    public static void fastUnzip(final Path inputZipfilePath, final Path outputDirPath, final boolean overwrite,
+    public static void quickUnzip(final Path inputZipfilePath, final Path outputDirPath, final boolean overwrite,
             final boolean verbose) {
         // Check input zipfile name exists
         final var inputZipfile = inputZipfilePath.toFile();
@@ -257,7 +257,7 @@ public class QuickUnzip {
             System.err.println("         -o => overwrite");
             System.exit(1);
         }
-        fastUnzip(Paths.get(unmatchedArgs.get(0)),
+        quickUnzip(Paths.get(unmatchedArgs.get(0)),
                 unmatchedArgs.size() == 2 ? Paths.get(unmatchedArgs.get(1)) : null, overwrite, verbose);
     }
 }

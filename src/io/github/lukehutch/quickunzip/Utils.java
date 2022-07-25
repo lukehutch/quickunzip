@@ -110,7 +110,7 @@ class Utils {
         /** Completion barrier. */
         @Override
         public void close() {
-            for (final var future : this) {
+            for (final Future future : this) {
                 try {
                     future.get();
                 } catch (final Exception e) {

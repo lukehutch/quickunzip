@@ -22,12 +22,17 @@ package io.github.lukehutch.quickunzip;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.Enumeration;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -64,9 +69,10 @@ public class QuickUnzip {
      *            If true, show directory and file names as they are created.
      */
     public static void quickUnzip(final Path inputZipfilePath, final Path outputDirPath, final boolean overwrite,
-            final boolean verbose) {
+            final boolean verbose) throws IOException
+    {
         // Check input zipfile name exists
-        final var inputZipfile = inputZipfilePath.toFile();
+        final File inputZipfile = inputZipfilePath.toFile();
         if (!inputZipfile.exists()) {
             System.err.println("Input zipfile not found: " + inputZipfile);
             System.exit(1);
@@ -79,10 +85,10 @@ public class QuickUnzip {
             if (outputDirPath == null) {
                 // Unzip to a directory with ".zip" or ".jar" stripped from the zip file name,
                 // or append "-files" if one of those extensions is not present
-                final var fileLeafName = inputZipfile.getName();
-                final var lastDotIdx = fileLeafName.lastIndexOf('.');
-                final var filenameExtension = lastDotIdx > 0 ? fileLeafName.substring(lastDotIdx + 1) : "";
-                final var unzipDirName = filenameExtension.equalsIgnoreCase("zip")
+                final String fileLeafName = inputZipfile.getName();
+                final int lastDotIdx = fileLeafName.lastIndexOf('.');
+                final String filenameExtension = lastDotIdx > 0 ? fileLeafName.substring(lastDotIdx + 1) : "";
+                final String unzipDirName = filenameExtension.equalsIgnoreCase("zip")
                         || filenameExtension.equalsIgnoreCase("jar") ? fileLeafName.substring(0, lastDotIdx)
                                 : fileLeafName + "-files";
                 // Unzip into a dir in the same parent directory as the zipfile
@@ -92,9 +98,9 @@ public class QuickUnzip {
             }
 
             // Check output dir exists, and if not, call mkdirs
-            final var unzipDirFile = unzipDirPath.toFile();
+            final File unzipDirFile = unzipDirPath.toFile();
             if (!unzipDirFile.exists()) {
-                final var mkdirsOk = unzipDirFile.mkdirs();
+                final boolean mkdirsOk = unzipDirFile.mkdirs();
                 if (!mkdirsOk) {
                     System.err.println("Could not create output directory: " + unzipDirFile);
                     System.exit(1);
@@ -109,12 +115,14 @@ public class QuickUnzip {
         if (verbose) {
             System.out.println("Unzipping " + inputZipfile + " to " + unzipDirPath);
         }
-        final var unzipDirPathFinal = unzipDirPath;
+        final Path unzipDirPathFinal = unzipDirPath;
 
         // Open the ZipFile and read all ZipEntries
-        final var zipEntries = new ArrayList<ZipEntry>();
-        try (var zipFile = new ZipFile(inputZipfile)) {
-            for (final var e = zipFile.entries(); e.hasMoreElements();) {
+        final ArrayList<ZipEntry> zipEntries = new ArrayList<ZipEntry>();
+        org.apache.commons.compress.archivers.zip.ZipFile apacheZip = new org.apache.commons.compress.archivers.zip.ZipFile(
+              inputZipfile);
+        try (ZipFile zipFile = new ZipFile(inputZipfile)) {
+            for (final Enumeration<? extends ZipEntry> e = zipFile.entries(); e.hasMoreElements();) {
                 zipEntries.add(e.nextElement());
             }
         } catch (final IOException e) {
@@ -124,10 +132,10 @@ public class QuickUnzip {
 
         // Singleton map indicating which directories were able to be successfully created (or already existed),
         // to avoid duplicating work calling mkdirs() multiple times for the same directories
-        final var createdDirs = new SingletonMap<File, Boolean>() {
+        final SingletonMap<File, Boolean> createdDirs = new SingletonMap<File, Boolean>() {
             @Override
             public Boolean newInstance(final File parentDir) throws Exception {
-                var parentDirExists = parentDir.exists();
+                boolean parentDirExists = parentDir.exists();
                 if (!parentDirExists) {
                     parentDirExists = parentDir.mkdirs();
                     if (!parentDirExists) {
@@ -157,10 +165,10 @@ public class QuickUnzip {
         };
 
         // Iterate through ZipEntries, extracting in parallel
-        try (final var openZipFiles = new AutoCloseableConcurrentQueue<ZipFile>();
-                final var executor = new AutoCloseableExecutorService("QuickUnzip", NUM_THREADS);
-                final var futures = new AutoCloseableFutureListWithCompletionBarrier(zipEntries.size())) {
-            for (final var zipEntry : zipEntries) {
+        try (final AutoCloseableConcurrentQueue<ZipFile> openZipFiles = new AutoCloseableConcurrentQueue<ZipFile>();
+                final AutoCloseableExecutorService executor = new AutoCloseableExecutorService("QuickUnzip", NUM_THREADS);
+                final AutoCloseableFutureListWithCompletionBarrier futures = new AutoCloseableFutureListWithCompletionBarrier(zipEntries.size())) {
+            for (final ZipEntry zipEntry : zipEntries) {
                 futures.add(executor.submit(() -> {
                     final ThreadLocal<ZipFile> zipFileTL = ThreadLocal.withInitial(() -> {
                         try {
@@ -176,14 +184,14 @@ public class QuickUnzip {
                         // Keep compiler happy
                         return null;
                     });
-                    var entryName = zipEntry.getName();
+                    String entryName = zipEntry.getName();
                     while (entryName.startsWith("/")) {
                         // Strip leading "/" if present
                         entryName = entryName.substring(1);
                     }
                     try {
                         // Make sure we don't allow paths that use "../" to break out of the unzip root dir
-                        final var entryPath = unzipDirPathFinal.resolve(entryName);
+                        final Path entryPath = unzipDirPathFinal.resolve(entryName);
                         if (!entryPath.startsWith(unzipDirPathFinal)) {
                             if (verbose) {
                                 System.out.println("      Bad path: " + entryName);
@@ -193,12 +201,12 @@ public class QuickUnzip {
                             createdDirs.getOrCreateSingleton(entryPath.toFile());
                         } else {
                             // Create parent directories if needed
-                            final var entryFile = entryPath.toFile();
-                            final var parentDir = entryFile.getParentFile();
-                            final var parentDirExists = createdDirs.getOrCreateSingleton(parentDir);
+                            final File entryFile = entryPath.toFile();
+                            final File parentDir = entryFile.getParentFile();
+                            final boolean parentDirExists = createdDirs.getOrCreateSingleton(parentDir);
                             if (parentDirExists) {
                                 // Open ZipEntry as an InputStream
-                                try (var inputStream = zipFileTL.get().getInputStream(zipEntry)) {
+                                try (InputStream inputStream = zipFileTL.get().getInputStream(zipEntry)) {
                                     if (overwrite) {
                                         if (verbose) {
                                             System.out.println("     Unzipping: " + entryName);
@@ -206,6 +214,7 @@ public class QuickUnzip {
                                         // Copy the contents of the ZipEntry InputStream to the output file,
                                         // overwriting existing files of the same name
                                         Files.copy(inputStream, entryPath, StandardCopyOption.REPLACE_EXISTING);
+                                        Files.setPosixFilePermissions(entryPath, permissionsFromMode(apacheZip.getEntry(entryName).getUnixMode()));
                                     } else {
                                         if (!entryFile.exists()) {
                                             if (verbose) {
@@ -213,6 +222,7 @@ public class QuickUnzip {
                                             }
                                             // Copy the contents of the ZipEntry InputStream to the output file
                                             Files.copy(inputStream, entryPath);
+                                            Files.setPosixFilePermissions(entryPath, permissionsFromMode(apacheZip.getEntry(entryName).getUnixMode()));
                                         } else if (verbose) {
                                             System.out.println("Already exists: " + entryName);
                                         }
@@ -236,11 +246,12 @@ public class QuickUnzip {
 
     // -------------------------------------------------------------------------------------------------------------
 
-    public static void main(final String[] args) {
-        final var unmatchedArgs = new ArrayList<String>();
+    public static void main(final String[] args) throws IOException
+    {
+        final ArrayList<String> unmatchedArgs = new ArrayList<String>();
         boolean overwrite = false;
         boolean verbose = true;
-        for (final var arg : args) {
+        for (final String arg : args) {
             if (arg.equals("-o")) {
                 overwrite = true;
             } else if (arg.equals("-q")) {
@@ -261,5 +272,27 @@ public class QuickUnzip {
         }
         quickUnzip(Paths.get(unmatchedArgs.get(0)),
                 unmatchedArgs.size() == 2 ? Paths.get(unmatchedArgs.get(1)) : null, overwrite, verbose);
+    }
+
+    //copied from https://github.com/apache/ant/blob/rel/1.10.9/src/main/org/apache/tools/ant/util/PermissionUtils.java
+    public static Set<PosixFilePermission> permissionsFromMode(int mode) {
+        Set<PosixFilePermission> permissions = EnumSet.noneOf(PosixFilePermission.class);
+        addPermissions(permissions, "OTHERS", mode);
+        addPermissions(permissions, "GROUP", mode >> 3);
+        addPermissions(permissions, "OWNER", mode >> 6);
+        return permissions;
+    }
+
+    private static void addPermissions(Set<PosixFilePermission> permissions,
+          String prefix, long mode) {
+        if ((mode & 1) == 1) {
+            permissions.add(PosixFilePermission.valueOf(prefix + "_EXECUTE"));
+        }
+        if ((mode & 2) == 2) {
+            permissions.add(PosixFilePermission.valueOf(prefix + "_WRITE"));
+        }
+        if ((mode & 4) == 4) {
+            permissions.add(PosixFilePermission.valueOf(prefix + "_READ"));
+        }
     }
 }
